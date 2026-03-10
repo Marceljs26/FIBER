@@ -1,1 +1,448 @@
+"""
+SEM Fiber Denoising — Deep Learning Pipeline
+==============================================
+Menggunakan model DL (DnCNN / SwinIR) untuk hasil mendekati AI tool online.
+
+SETUP (jalankan sekali):
+    pip install torch torchvision opencv-python numpy matplotlib Pillow requests
+
+CARA PAKAI:
+    1. Jalankan seksi "DOWNLOAD MODELS" dulu (butuh internet sekali)
+    2. Setelah model tersimpan, jalankan fungsi denoise_sem()
+    3. Model disimpan lokal → tidak butuh internet lagi setelah itu
+
+Model yang tersedia:
+    - DnCNN  : Ringan, cepat, bagus untuk Gaussian noise
+    - SwinIR : Lebih berat tapi hasil terbaik, mendekati tool AI online
+"""
+
+import os
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from PIL import Image
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
+MODEL_DIR   = "./models"
+OUTPUT_DIR  = "./output_dl"
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODEL 1: DnCNN (cepat, ringan)
+# ═══════════════════════════════════════════════════════════════
+
+class DnCNN(nn.Module):
+    """
+    DnCNN: Beyond a Gaussian Denoiser (Zhang et al., 2017)
+    - 17 layer convolutional network
+    - Residual learning: output = input - predicted_noise
+    - Sangat efektif untuk SEM image noise
+    """
+    def __init__(self, channels=1, num_layers=17, features=64):
+        super().__init__()
+        layers = [nn.Conv2d(channels, features, 3, padding=1), nn.ReLU(inplace=True)]
+        for _ in range(num_layers - 2):
+            layers += [
+                nn.Conv2d(features, features, 3, padding=1, bias=False),
+                nn.BatchNorm2d(features),
+                nn.ReLU(inplace=True)
+            ]
+        layers.append(nn.Conv2d(features, channels, 3, padding=1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return x - self.net(x)  # residual: hapus noise dari input
+
+
+def download_dncnn_weights(save_path: str):
+    """
+    Download pretrained DnCNN weights dari GitHub.
+    Source: https://github.com/cszn/KAIR (official implementation)
+    """
+    import requests
+    url = "https://github.com/cszn/KAIR/releases/download/v1.0/dncnn_gray_blind.pth"
+    print(f"Downloading DnCNN weights...")
+    r = requests.get(url, stream=True)
+    with open(save_path, 'wb') as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
+    print(f"  Saved: {save_path}")
+
+
+def load_dncnn(weights_path: str = None) -> DnCNN:
+    """Load DnCNN model. Jika weights tidak ada, download otomatis."""
+    if weights_path is None:
+        weights_path = os.path.join(MODEL_DIR, "dncnn_gray_blind.pth")
+
+    if not os.path.exists(weights_path):
+        download_dncnn_weights(weights_path)
+
+    model = DnCNN(channels=1, num_layers=20)  # blind model pakai 20 layers
+    state = torch.load(weights_path, map_location=DEVICE)
+
+    # Handle berbagai format state dict
+    if 'params' in state:
+        state = state['params']
+    model.load_state_dict(state, strict=False)
+    model.eval().to(DEVICE)
+    print("DnCNN loaded!")
+    return model
+
+
+@torch.no_grad()
+def denoise_dncnn(img: np.ndarray, model: DnCNN) -> np.ndarray:
+    """
+    Denoise SEM image menggunakan DnCNN.
+
+    Args:
+        img  : Grayscale image (H x W), uint8 [0-255]
+        model: DnCNN model yang sudah di-load
+
+    Returns:
+        Denoised image, uint8 [0-255]
+    """
+    # SwinIR grayscale pakai img_range=255 → input dalam range [0, 255]
+    x = torch.from_numpy(img.astype(np.float32))
+    x = x.unsqueeze(0).unsqueeze(0).to(DEVICE)  # [1,1,H,W]
+
+    # Pad supaya divisible by window_size (8)
+    h, w = x.shape[2], x.shape[3]
+    pad_h = (8 - h % 8) % 8
+    pad_w = (8 - w % 8) % 8
+    x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+
+    out = model(x)
+    out = out[:, :, :h, :w]  # unpad
+    out = out.squeeze().cpu().numpy()
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODEL 2: SwinIR (terbaik, mendekati AI tool online)
+# ═══════════════════════════════════════════════════════════════
+
+class SwinIR_Denoiser(nn.Module):
+    """
+    SwinIR: Image Restoration Using Swin Transformer (Liang et al., 2021)
+    - State-of-the-art image denoising
+    - Swin Transformer architecture dengan shifted windows
+    - Hasil PALING mendekati tool AI online seperti Topaz / Visual Paradigm
+
+    Install terpisah:
+        pip install timm
+        git clone https://github.com/JingyunLiang/SwinIR
+    """
+    pass  # Lihat cara pakai di bawah
+
+
+def setup_swinir():
+    """
+    Setup SwinIR dari repo resmi.
+    Jalankan ini SEKALI untuk download repo dan weights.
+    
+    Weights yang dipakai: GrayDN (grayscale denoising)
+    File: 004_grayDN_DFWB_s128w8_SwinIR-M_noise{level}.pth
+    """
+    import subprocess
+    import requests
+
+    print("Setting up SwinIR...")
+
+    # Clone repo jika belum ada
+    swinir_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SwinIR")
+    if not os.path.exists(swinir_dir):
+        subprocess.run(["git", "clone",
+                        "https://github.com/JingyunLiang/SwinIR.git",
+                        swinir_dir], check=True)
+        print("  Repo cloned!")
+
+    # Weights yang BENAR untuk GRAYSCALE denoising
+    weights = {
+        "swinir_denoising_gray_noise15.pth":
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "004_grayDN_DFWB_s128w8_SwinIR-M_noise15.pth",
+        "swinir_denoising_gray_noise25.pth":
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "004_grayDN_DFWB_s128w8_SwinIR-M_noise25.pth",
+        "swinir_denoising_gray_noise50.pth":
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "004_grayDN_DFWB_s128w8_SwinIR-M_noise50.pth",
+    }
+
+    for fname, url in weights.items():
+        fpath = os.path.join(MODEL_DIR, fname)
+        if not os.path.exists(fpath):
+            print(f"  Downloading {fname}...")
+            r = requests.get(url, stream=True)
+            with open(fpath, 'wb') as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+            print(f"  Saved: {fname}")
+
+    print("SwinIR setup complete!")
+
+
+def load_swinir(noise_level: int = 25):
+    """
+    Load SwinIR model untuk grayscale denoising.
+
+    Args:
+        noise_level: 15, 25, atau 50 — sesuaikan dengan tingkat noise SEM kamu
+                     SEM biasanya cocok dengan 25 atau 50
+
+    Returns:
+        SwinIR model siap pakai
+    """
+    import sys
+    # Path ke folder SwinIR (di sebelah script ini)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    swinir_dir = os.path.join(script_dir, "SwinIR")
+    sys.path.insert(0, swinir_dir)
+    from models.network_swinir import SwinIR
+
+    weights_path = os.path.join(MODEL_DIR, f"swinir_denoising_gray_noise{noise_level}.pth")
+    if not os.path.exists(weights_path):
+        setup_swinir()
+
+    # in_chans=1 untuk grayscale SEM image
+    model = SwinIR(
+        upscale=1,
+        in_chans=1,
+        img_size=128,
+        window_size=8,
+        img_range=255.0,
+        depths=[6, 6, 6, 6, 6, 6],
+        embed_dim=180,
+        num_heads=[6, 6, 6, 6, 6, 6],
+        mlp_ratio=2,
+        upsampler='',
+        resi_connection='1conv'
+    )
+
+    state = torch.load(weights_path, map_location=DEVICE)
+    if 'params' in state:
+        state = state['params']
+    model.load_state_dict(state, strict=True)
+    model.eval().to(DEVICE)
+    print(f"SwinIR grayscale (noise={noise_level}) loaded!")
+    return model
+
+
+@torch.no_grad()
+def denoise_swinir(img: np.ndarray, model, tile_size: int = 256,
+                   tile_overlap: int = 32) -> np.ndarray:
+    """
+    Denoise SEM image menggunakan SwinIR dengan tile-based inference.
+    Tile digunakan supaya gambar besar tidak OOM di GPU/RAM.
+
+    Args:
+        img         : Grayscale uint8 [0-255]
+        model       : SwinIR model
+        tile_size   : Ukuran tile (256 untuk RAM 8GB, 512 untuk 16GB+)
+        tile_overlap: Overlap antar tile untuk menghindari artifacts
+
+    Returns:
+        Denoised image, uint8 [0-255]
+    """
+    h, w = img.shape
+    x = torch.from_numpy(img.astype(np.float32) / 255.0)
+    x = x.unsqueeze(0).unsqueeze(0).to(DEVICE)  # [1,1,H,W]
+
+    # Tile-based inference
+    stride = tile_size - tile_overlap
+    h_idx_list = list(range(0, h - tile_size, stride)) + [max(0, h - tile_size)]
+    w_idx_list = list(range(0, w - tile_size, stride)) + [max(0, w - tile_size)]
+
+    output = torch.zeros_like(x)
+    count  = torch.zeros_like(x)
+
+    for h_idx in h_idx_list:
+        for w_idx in w_idx_list:
+            h_end = min(h_idx + tile_size, h)
+            w_end = min(w_idx + tile_size, w)
+            h_s   = h_end - tile_size
+            w_s   = w_end - tile_size
+
+            tile_in = x[:, :, h_s:h_end, w_s:w_end]
+            tile_out = model(tile_in)
+            output[:, :, h_s:h_end, w_s:w_end] += tile_out
+            count [:, :, h_s:h_end, w_s:w_end] += 1
+
+    output = output / count
+    out = output.squeeze().cpu().numpy()
+    out = np.clip(out * 255, 0, 255).astype(np.uint8)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN PIPELINE: Full SEM Denoising
+# ═══════════════════════════════════════════════════════════════
+
+def load_sem_image(path: str, crop_bottom: int = 60) -> np.ndarray:
+    """Load dan crop SEM image."""
+    img = np.array(Image.open(path).convert('L'))
+    return img[:-crop_bottom, :]
+
+
+def post_process(img: np.ndarray,
+                 clahe_clip: float = 1.0,
+                 gamma: float = 1.03) -> np.ndarray:
+    """
+    Post-processing ringan setelah DL denoising:
+    - CLAHE soft untuk tingkatkan kontras lokal
+    - Gamma correction untuk sesuaikan brightness
+    """
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(16, 16))
+    img = clahe.apply(img)
+    lut = np.array([(i / 255.0) ** gamma * 255 for i in range(256)], dtype=np.uint8)
+    return cv2.LUT(img, lut)
+
+
+def denoise_sem(input_path: str,
+                model_type: str = "dncnn",
+                noise_level: int = 25,
+                apply_postprocess: bool = True,
+                crop_bottom: int = 60) -> np.ndarray:
+    """
+    Pipeline lengkap: Load → DL Denoise → Post-process → Save
+
+    Args:
+        input_path      : Path ke file SEM (.tif / .png)
+        model_type      : "dncnn" atau "swinir"
+        noise_level     : Untuk SwinIR: 15, 25, atau 50
+        apply_postprocess: Tambah CLAHE+gamma setelah DL
+        crop_bottom     : Pixel info bar yang di-crop
+
+    Returns:
+        Denoised image (numpy array)
+    """
+    print(f"\n{'='*55}")
+    print(f"  SEM DL Denoising Pipeline")
+    print(f"  Model: {model_type.upper()} | Device: {DEVICE}")
+    print(f"{'='*55}")
+
+    # Load
+    img = load_sem_image(input_path, crop_bottom)
+    print(f"  Input: {img.shape} | {input_path}")
+
+    # Load model & denoise
+    if model_type == "dncnn":
+        model = load_dncnn()
+        denoised = denoise_dncnn(img, model)
+
+    elif model_type == "swinir":
+        model = load_swinir(noise_level)
+        denoised = denoise_swinir(img, model)
+
+    else:
+        raise ValueError(f"Unknown model: {model_type}. Use 'dncnn' or 'swinir'")
+
+    # Post-process
+    if apply_postprocess:
+        result = post_process(denoised, clahe_clip=1.0, gamma=1.03)
+    else:
+        result = denoised
+
+    # Stats
+    def lap(im): return cv2.Laplacian(im.astype(np.float64), cv2.CV_64F).var()
+    print(f"\n  Original : lap={lap(img):.0f} | std={img.std():.1f} | mean={img.mean():.1f}")
+    print(f"  Denoised : lap={lap(result):.0f} | std={result.std():.1f} | mean={result.mean():.1f}")
+
+    # Save
+    fname = os.path.splitext(os.path.basename(input_path))[0]
+    out_path = os.path.join(OUTPUT_DIR, f"{fname}_{model_type}_denoised.png")
+    cv2.imwrite(out_path, result)
+    print(f"  Saved: {out_path}")
+
+    # Visual comparison
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    axes[0].imshow(img, cmap='gray')
+    axes[0].set_title(f"Original\nlap={lap(img):.0f} | std={img.std():.1f}")
+    axes[0].axis('off')
+    axes[1].imshow(result, cmap='gray')
+    axes[1].set_title(f"DL Denoised ({model_type.upper()})\nlap={lap(result):.0f} | std={result.std():.1f}")
+    axes[1].axis('off')
+    plt.tight_layout()
+    fig_path = os.path.join(OUTPUT_DIR, f"{fname}_{model_type}_comparison.png")
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Comparison: {fig_path}")
+
+    return result
+
+
+def batch_denoise(input_folder: str, model_type: str = "swinir",
+                  noise_level: int = 25):
+    """
+    Batch processing semua TIF/PNG dalam satu folder.
+
+    Contoh:
+        batch_denoise("./sem_images/", model_type="swinir", noise_level=25)
+    """
+    import glob
+    files = glob.glob(os.path.join(input_folder, "*.tif")) + \
+            glob.glob(os.path.join(input_folder, "*.png"))
+
+    print(f"Found {len(files)} files")
+
+    # Load model sekali untuk semua file
+    if model_type == "dncnn":
+        model = load_dncnn()
+        denoise_fn = lambda img: denoise_dncnn(img, model)
+    else:
+        model = load_swinir(noise_level)
+        denoise_fn = lambda img: denoise_swinir(img, model)
+
+    for fpath in files:
+        img = load_sem_image(fpath)
+        denoised = denoise_fn(img)
+        result = post_process(denoised)
+        fname = os.path.splitext(os.path.basename(fpath))[0]
+        cv2.imwrite(os.path.join(OUTPUT_DIR, f"{fname}_denoised.png"), result)
+        print(f"  Done: {fname}")
+
+    print(f"\nAll done! Results in: {OUTPUT_DIR}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# QUICK START
+# ═══════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+
+    INPUT_IMAGE = "S8_5K.tif"    # ← ganti path gambar SEM kamu
+
+    # ── OPSI 1: DnCNN (cepat, ~5 detik/gambar di CPU) ──
+    # result = denoise_sem(INPUT_IMAGE, model_type="dncnn")
+
+    # ── OPSI 2: SwinIR (terbaik, ~30-60 detik di CPU) ──
+    result = denoise_sem(
+        INPUT_IMAGE,
+        model_type="swinir",
+        noise_level=25,       # coba 15, 25, atau 50
+        apply_postprocess=True
+    )
+
+    # ── OPSI 3: Batch processing ──
+    # batch_denoise("./sem_images/", model_type="swinir", noise_level=25)
+
+    print("\nDone!")
+
+
+# ═══════════════════════════════════════════════════════════════
+# INSTALL & SETUP GUIDE
+# ═══════════════════════════════════════════════════════════════
 
