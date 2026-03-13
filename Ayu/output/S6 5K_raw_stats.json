@@ -1,0 +1,44 @@
+{
+  "config": {
+    "n_classes": 4,
+    "min_fiber_area": 30,
+    "max_hole_area": 800,
+    "gaussian_sigma": 1.0,
+    "footer_fraction": 0.91
+  },
+  "footer_info": {
+    "method": "fallback 91% tinggi gambar",
+    "footer_rows": 87
+  },
+  "thresholds": [
+    85.0,
+    105.0,
+    125.0
+  ],
+  "layers": {
+    "background": {
+      "pixel_count": 203140,
+      "percentage": 18.18,
+      "n_regions": 410,
+      "mean_intensity": 72.65
+    },
+    "layer3_deep": {
+      "pixel_count": 44874,
+      "percentage": 4.02,
+      "n_regions": 701,
+      "mean_intensity": 94.37
+    },
+    "layer2_mid": {
+      "pixel_count": 16726,
+      "percentage": 1.5,
+      "n_regions": 367,
+      "mean_intensity": 114.28
+    },
+    "layer1_top": {
+      "pixel_count": 169316,
+      "percentage": 15.15,
+      "n_regions": 213,
+      "mean_intensity": 138.55
+    }
+  }
+}
